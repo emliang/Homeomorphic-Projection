@@ -44,12 +44,11 @@ class MaskedLinear(nn.Module):
         if cond_in_features is not None:
             self.cond_linear = nn.Sequential(nn.Linear(cond_in_features, 2*out_features))
         self.register_buffer('mask', mask)
-
     def forward(self, inputs, cond_inputs=None):
         output = F.linear(inputs, self.linear.weight * self.mask, self.linear.bias)
         if cond_inputs is not None:
             w, b = self.cond_linear(cond_inputs).chunk(2, 1)
-            output = output  * w + b
+            output = output * w + b
         return output
 
 

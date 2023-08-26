@@ -9,7 +9,7 @@ torch.set_default_dtype(torch.float64)
 
 
 ###################################################################
-# Unsupervised Training
+# Unsupervised Training for Minimum-Distortion-Homeomoprhic Mapping
 ###################################################################
 def training(model, constraints, optimizer, scheduler, x_tensor, t_tensor, args):
     batch_size = args['batch_size']
@@ -37,16 +37,17 @@ def training(model, constraints, optimizer, scheduler, x_tensor, t_tensor, args)
         else:
             xt, logdet, logdis = model(x_input, t_input)
         trans = torch.mean((x_input - xt) ** 2, dim=1, keepdim=True)
-        volume = logdet # * unit_volume
+        volume = logdet
         xt_scale = constraints.scale(t_input, xt)
         xt_full = constraints.complete_partial(t_input, xt_scale)
         violation = constraints.cal_penalty(t_input, xt_full)
         penalty = torch.sum(torch.abs(violation), dim=-1, keepdim=True)
-        loss = -  torch.mean(volume)  \
+        loss = -  torch.mean(volume) /n_dim  \
                 +  penalty_coefficient * torch.mean(penalty) \
                 +  distortion_coefficient * torch.mean(logdis) \
-                +  transport_coefficient * torch.mean(trans)
+                +  transport_coefficient * torch.mean(trans) 
         loss.backward()
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.01)
         optimizer.step()
         scheduler.step()
         volume_list.append(torch.mean(logdet).detach().cpu().numpy()/n_dim)
@@ -60,7 +61,7 @@ def training(model, constraints, optimizer, scheduler, x_tensor, t_tensor, args)
                 x0,_,_ = model(bias_tensor, t_input)
                 x0_scale = constraints.scale(t_input, x0)
                 x0_full = constraints.complete_partial(t_input, x0_scale, backward=False)
-                violation_0 = constraints.cal_penalty(t_input, x0_full)
+                violation_0 = constraints.check_feasibility(t_input, x0_full)
                 penalty_0 = torch.sum(torch.abs(violation_0), dim=-1, keepdim=True)
             print(f'Iteration: {n}/{total_iteration}, '
                   f'Volume: {volume_list[-1]:.4f}, '
@@ -94,7 +95,7 @@ def homeo_bisection(model, constraints, args, x_tensor, t_tensor):
             xt, _,_ = model(alpha * (x_latent_infeasible - bias) + bias, t_tensor_infeasible)
             xt_scale = constraints.scale(t_tensor_infeasible, xt)
             xt_full = constraints.complete_partial(t_tensor_infeasible, xt_scale, backward=False)
-            violation = constraints.cal_penalty(t_tensor_infeasible, xt_full)
+            violation = constraints.check_feasibility(t_tensor_infeasible, xt_full)
             penalty = torch.max(torch.abs(violation), dim=1)[0]
             sub_feasible_index = (penalty < eps)
             sub_infeasible_index = (penalty >= eps)
@@ -106,6 +107,47 @@ def homeo_bisection(model, constraints, args, x_tensor, t_tensor):
         xt_scale = constraints.scale(t_tensor_infeasible, xt)
         xt_full = constraints.complete_partial(t_tensor_infeasible, xt_scale, backward=False)
     return xt_full, k
+
+
+
+
+###################################################################
+# Binary Search in the Constraint Space
+###################################################################
+def gauge_bisection(model, constraints, args, x_tensor, t_tensor):
+    model.eval()
+    steps = args['proj_para']['corrTestMaxSteps']
+    eps = args['proj_para']['corrEps']
+    bis_step = args['proj_para']['corrBis']
+    with torch.no_grad():
+        t_tensor_infeasible = t_tensor
+        x_tensor_infeasible = x_tensor
+        bias_tensor = torch.ones_like(x_tensor_infeasible, device=x_tensor.device) * np.mean(args['mapping_para']['bound'])
+        x_interior_feasible, _, _ = model(bias_tensor, t_tensor_infeasible)
+        # x_latent_infeasible, _, _ = model.backward(x_tensor_infeasible, t_tensor_infeasible)
+        alpha_upper = torch.ones([t_tensor_infeasible.shape[0], 1], device=x_tensor.device)
+        alpha_lower = torch.zeros([t_tensor_infeasible.shape[0], 1], device=x_tensor.device)
+        for k in range(steps):
+            alpha = (1-bis_step)*alpha_lower + bis_step*alpha_upper
+            # xt, _,_ = model(alpha * (x_latent_infeasible - bias) + bias, t_tensor_infeasible)
+            xt = alpha * (x_tensor_infeasible - x_interior_feasible) + x_interior_feasible
+            xt_scale = constraints.scale(t_tensor_infeasible, xt)
+            xt_full = constraints.complete_partial(t_tensor_infeasible, xt_scale, backward=False)
+            violation = constraints.check_feasibility(t_tensor_infeasible, xt_full)
+            penalty = torch.max(torch.abs(violation), dim=1)[0]
+            sub_feasible_index = (penalty < eps)
+            sub_infeasible_index = (penalty >= eps)
+            alpha_lower[sub_feasible_index] = alpha[sub_feasible_index]
+            alpha_upper[sub_infeasible_index] = alpha[sub_infeasible_index]
+            if (alpha_upper-alpha_lower).max()<1e-2:
+                break
+        xt = alpha_lower * (x_tensor_infeasible - x_interior_feasible) + x_interior_feasible
+        # xt, _, _ = model(alpha_lower * (x_latent_infeasible - bias) + bias, t_tensor_infeasible)
+        xt_scale = constraints.scale(t_tensor_infeasible, xt)
+        xt_full = constraints.complete_partial(t_tensor_infeasible, xt_scale, backward=False)
+    return xt_full, k    
+    
+
 
 
 
@@ -147,163 +189,6 @@ def diff_projection(data, X, Y, args):
 
 
 
-
-
-#################################################################
-# Constraint for 2-dim toy example
-#################################################################
-
-
-class Convex_Constraints:
-    def __init__(self):
-        """
-        Ax - b <= 0
-        """
-        self.A = torch.tensor(np.array([[1, -1], [-1, -1], [1, 1], [-1, 1]])).permute(1, 0).to(device=device)
-        self.b = torch.tensor(np.array([2, 2, 2, 2])).view(1, 4).to(device=device)
-
-        self.t_test = [[0.3, 0.3, 0.3, 0.3], [0.3, 0.3, 1.7, 1.7], [1.7, 1.7, 0.3, 1.7], [1.7, 1.7, 1.7, 1.7]]
-        self.sampling_range = [0, 2]
-        self.t_dim = 4
-
-    def forward(self, x):
-        violation = torch.matmul(x, self.A) - (self.b)
-
-        return violation
-
-    def cal_penalty(self, t, x):
-        violation = torch.matmul(x, self.A) - t
-
-        return violation
-
-    def scale(self, t, x):
-        return x
-
-    def complete_partial(self, t, x, backward=True):
-        return x
-
-    def plot_boundary(self, t):
-        x = np.linspace(-2, 2, 100)
-        boundary, _, _, _ = plt.plot(x, x - t[0], x, -x - t[1], x, -x + t[2], x, x + t[3],
-                                     linewidth=2, alpha=0.9, c='cornflowerblue', )
-        return boundary
-
-
-class Non_Convex_Constraints:
-    def __init__(self):
-        """
-        A[x,y] - b + t <= 0
-        """
-        self.A = torch.tensor(np.array([[1, -1], [-1, -1], [1, 1], [-1, 1]])).permute(1, 0).to(device=device)
-        self.bias = 2
-        self.b = torch.tensor(np.array([self.bias] * 4)).view(1, 4).to(device=device)
-
-        self.t_test = [[1.5, 1.5], [1.5, 0.2], [0.2, 1.5], [0.2, 0.2]]
-        self.sampling_range = [0, 2]
-        self.t_dim = 2
-
-    def cal_penalty(self, t, x):
-        """
-        y <= 0.5*x^2 + [0,2]
-        y >= -0.5x^2 - [0,2]
-        """
-        violation = torch.matmul(x, self.A) - (self.b)
-        violation_1 = (-0.5 * (x[:, [0]]) ** 2 + x[:, [1]] - t[:, [0]])
-        violation_2 = (-0.5 * (x[:, [0]]) ** 2 - x[:, [1]] - t[:, [1]])
-        violation = torch.cat([violation, violation_1, violation_2], dim=-1)
-        return violation
-
-    def scale(self, t, x):
-        return x
-
-    def complete_partial(self, t, x, backward=True):
-        return x
-
-    def plot_boundary(self, t):
-        tt = self.bias
-        x = np.linspace(-2, 2, 100)
-        boundary, _, _ = plt.plot([0, tt, 0, -tt, 0], [tt, 0, -tt, 0, tt],
-                                  x, 0.5 * x ** 2 + t[0],
-                                  x, -0.5 * x ** 2 - t[1], linewidth=2, alpha=0.9, c='cornflowerblue', )
-        return boundary
-
-
-class Complex_Constraints:
-    def __init__(self):
-        """
-        xTx <= 0
-        """
-        self.A = torch.tensor(np.array([[1., -1.], [-1., -1.], [1., 1.], [-1., 1.]])).permute(1, 0).to(device=device)
-        # self.bias = 2
-        # self.b = torch.tensor(np.array([self.bias] * 4)).view(1, 4).to(device=device)
-        # self.t_test = [ [1.5, 1.5, 0.5, 1.5, 1.5, 0.5],
-        #                 [1.5, 0.5, 1.5, 1.5, 0.5, 0.5],
-        #                 [0.5, 1.5, 0.5, 0.5, 1.5, 0.5],
-        #                 [0.5, 0.5, 1.5, 1.5, 1.5, 0.5]]
-        self.sampling_range = [0.1, 2]
-        self.t_dim = 6 + 2
-        self.n_case = 8
-        self.t_test = np.random.uniform(low=self.sampling_range[0],
-                                        high=self.sampling_range[1],
-                                        size=[self.n_case,self.t_dim])
-
-    def cal_penalty(self, t, x):
-        """
-        y <= 0.5*x^2 + [0,2]
-        y >= -0.5x^2 - [0,2]
-        """
-        bias = t[:,2:6]
-        violation = torch.matmul(x, self.A) - (bias)
-        violation_1 = (-t[:,[6]] * (x[:, [0]]) ** 2 + x[:, [1]] - t[:, [0]])
-        violation_2 = (-t[:,[7]] * (x[:, [0]]) ** 2 - x[:, [1]] - t[:, [1]])
-        violation = torch.cat([violation, violation_1, violation_2], dim=-1)
-        return torch.clamp(violation, 0)
-
-    def scale(self, t, x):
-        return x
-
-    def complete_partial(self, t, x, backward=True):
-        return x
-
-    def plot_boundary(self, t):
-        x = np.linspace(-5, 5, 1000)
-        plt.plot(x,  x - t[2], linewidth=1.5, alpha=0.7, c='cornflowerblue')
-        plt.plot(x, -x - t[3], linewidth=1.5, alpha=0.7, c='cornflowerblue')
-        plt.plot(x, -x + t[4], linewidth=1.5, alpha=0.7, c='cornflowerblue')
-        plt.plot(x,  x + t[5], linewidth=1.5, alpha=0.7, c='cornflowerblue')
-        plt.plot(x, t[6] * x ** 2 + t[0], linewidth=1.5, alpha=0.7, c='cornflowerblue')
-        plt.plot(x, -t[7] * x ** 2 - t[1], linewidth=1.5, alpha=0.7, c='cornflowerblue')
-
-
-class Box_Constraints:
-    def __init__(self):
-        """
-        -t1 < x < t1
-        -t2 < y < t2
-        """
-        self.t_test = [[0.2, 1.8], [0.8, 1.2], [1.2, 0.8], [1.8, 0.2]]
-        self.sampling_range = [0, 2]
-        self.t_dim = 2
-
-    def cal_penalty(self, t, x):
-        violation = [torch.relu(x[:, [0]] - t[:, [0]]),
-                     torch.relu(x[:, [1]] - t[:, [1]]),
-                     torch.relu(-x[:, [0]] - t[:, [0]]),
-                     torch.relu(-x[:, [1]] - t[:, [1]])]
-        violation = torch.cat(violation, dim=-1)
-        return violation
-
-    def scale(self, t, x):
-        return x
-
-    def complete_partial(self, t, x, backward=True):
-        return x
-
-    def plot_boundary(self, t):
-        t1 = t[0]
-        t2 = t[1]
-        boundary = plt.plot([t1, t1, -t1, -t1, t1], [t2, -t2, -t2, t2, t2], linewidth=2, alpha=0.9, c='cornflowerblue')
-        return boundary
 
 
 
