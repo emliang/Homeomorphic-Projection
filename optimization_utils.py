@@ -538,6 +538,8 @@ class SDPProbem(BaseProblem):
         super().__init__(dataset, test_size)
         self.Q_np = dataset['Q']
         self.A_np = dataset['A']
+        self.L_np = dataset['YL']
+        self.U_np = dataset['YU']
         self.Q = torch.tensor(dataset['Q'] )
         self.A = torch.tensor(dataset['A'] )
         self.xdim = dataset['X'].shape[1]
@@ -600,17 +602,17 @@ class SDPProbem(BaseProblem):
         r1 = torch.abs(self.eq_resid(X, Y))
         r2 = torch.clamp(torch.cat([self.L - Y, Y - self.U], dim=1), 0)
         Ym = Y.view(Y.shape[0], self.ymdim, self.ymdim).permute(0, 2, 1)  # batch * n * n
-        try:
-            r3 = torch.linalg.eigvals(Ym)#.real
-            r3 = -1 * torch.min(r3, keepdim=True)
-        except:
-            eigenvalues_list = []
-            for i in range(Ym.shape[0]):
-                matrix = Ym[i]
-                eigenvalues = torch.eig(matrix, eigenvectors=False).eigenvalues[:, 0]
-                eigenvalues_list.append(torch.min(eigenvalues).unsqueeze(0))
-            pel = torch.stack(eigenvalues_list, dim=0)
-            r3 = -pel.view(-1,1)
+        # try:
+        r3 = torch.linalg.eigvals(Ym).real
+        r3 = -1 * torch.min(r3, dim=1, keepdim=True)[0]
+        # except:
+        #     eigenvalues_list = []
+        #     for i in range(Ym.shape[0]):
+        #         matrix = Ym[i]
+        #         eigenvalues = torch.eig(matrix, eigenvectors=False).eigenvalues[:, 0]
+        #         eigenvalues_list.append(torch.min(eigenvalues).unsqueeze(0))
+        #     pel = torch.stack(eigenvalues_list, dim=0)
+        #     r3 = -pel.view(-1,1)
         r3 = torch.clamp(r3, 0)
         return torch.cat([r1, r2, r3], dim=1)
 

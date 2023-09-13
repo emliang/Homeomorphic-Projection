@@ -12,7 +12,7 @@ defaults = config()
 
 def main():
     args = config()
-    for prob in ['sdp']:
+    for prob in ['qp']:
         if prob == 'acopf':
             for size in [[30, 10000], 
                          [118, 20000]]:

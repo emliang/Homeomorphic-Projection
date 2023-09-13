@@ -68,7 +68,7 @@ def training(model, constraints, optimizer, scheduler, x_tensor, t_tensor, args)
                   f'Penalty: {penalty_list[-1]:.4f}, '
                   f'Distortion: {dist_list[-1]:.4f}, '
                   f'Transport: {trans_list[-1]:.4f}, '
-                  f'Valid: {torch.mean(penalty_0).detach().cpu().numpy():.8f}',
+                  f'test: {torch.mean(penalty_0).detach().cpu().numpy():.8f}',
                   end='\n')
     return model, volume_list, penalty_list, dist_list, trans_list
 
@@ -108,45 +108,6 @@ def homeo_bisection(model, constraints, args, x_tensor, t_tensor):
         xt_full = constraints.complete_partial(t_tensor_infeasible, xt_scale, backward=False)
     return xt_full, k
 
-
-
-
-###################################################################
-# Binary Search in the Constraint Space
-###################################################################
-def gauge_bisection(model, constraints, args, x_tensor, t_tensor):
-    model.eval()
-    steps = args['proj_para']['corrTestMaxSteps']
-    eps = args['proj_para']['corrEps']
-    bis_step = args['proj_para']['corrBis']
-    with torch.no_grad():
-        t_tensor_infeasible = t_tensor
-        x_tensor_infeasible = x_tensor
-        bias_tensor = torch.ones_like(x_tensor_infeasible, device=x_tensor.device) * np.mean(args['mapping_para']['bound'])
-        x_interior_feasible, _, _ = model(bias_tensor, t_tensor_infeasible)
-        # x_latent_infeasible, _, _ = model.backward(x_tensor_infeasible, t_tensor_infeasible)
-        alpha_upper = torch.ones([t_tensor_infeasible.shape[0], 1], device=x_tensor.device)
-        alpha_lower = torch.zeros([t_tensor_infeasible.shape[0], 1], device=x_tensor.device)
-        for k in range(steps):
-            alpha = (1-bis_step)*alpha_lower + bis_step*alpha_upper
-            # xt, _,_ = model(alpha * (x_latent_infeasible - bias) + bias, t_tensor_infeasible)
-            xt = alpha * (x_tensor_infeasible - x_interior_feasible) + x_interior_feasible
-            xt_scale = constraints.scale(t_tensor_infeasible, xt)
-            xt_full = constraints.complete_partial(t_tensor_infeasible, xt_scale, backward=False)
-            violation = constraints.check_feasibility(t_tensor_infeasible, xt_full)
-            penalty = torch.max(torch.abs(violation), dim=1)[0]
-            sub_feasible_index = (penalty < eps)
-            sub_infeasible_index = (penalty >= eps)
-            alpha_lower[sub_feasible_index] = alpha[sub_feasible_index]
-            alpha_upper[sub_infeasible_index] = alpha[sub_infeasible_index]
-            if (alpha_upper-alpha_lower).max()<1e-2:
-                break
-        xt = alpha_lower * (x_tensor_infeasible - x_interior_feasible) + x_interior_feasible
-        # xt, _, _ = model(alpha_lower * (x_latent_infeasible - bias) + bias, t_tensor_infeasible)
-        xt_scale = constraints.scale(t_tensor_infeasible, xt)
-        xt_full = constraints.complete_partial(t_tensor_infeasible, xt_scale, backward=False)
-    return xt_full, k    
-    
 
 
 
@@ -248,27 +209,27 @@ def csv_record(epoch_stats, data, args):
     else:
         data_record = pd.read_csv(record_file, index_col=False)
     ### Record pure NN prediction & x-Proj post-processing
-    infeasible_index = epoch_stats['valid_index_infeasible']
+    infeasible_index = epoch_stats['test_index_infeasible']
 
     row_index = (data_record['Prob'] == str(data)) & (data_record['Algo'] == 'NN')
     if not row_index.any():
         data_record.loc[data_record.shape[0]] = {'Prob': str(data), 'Algo': 'NN'}
         row_index = (data_record['Prob'] == str(data)) & (data_record['Algo'] == 'NN')
-    data_record.loc[row_index, 'Fea_rate'] = round((1-np.mean(epoch_stats['valid_raw_vio_instance']))*100, 2)
-    data_record.loc[row_index, 'Ineq_vio'] = round(np.mean(epoch_stats['valid_raw_ineq_sum'][infeasible_index]), 3)
-    data_record.loc[row_index, 'Ineq_vio_rate'] = round(np.mean(epoch_stats['valid_raw_ineq_num_viol_0'][infeasible_index])/data.nineq*100,2)
-    data_record.loc[row_index, 'Eq_vio'] = round(np.mean(epoch_stats['valid_raw_eq_sum'][infeasible_index]), 3)
-    data_record.loc[row_index, 'Eq_vio_rate'] = round(np.mean(epoch_stats['valid_raw_eq_num_viol_0'][infeasible_index])/data.neq*100, 2)
+    data_record.loc[row_index, 'Fea_rate'] = round((1-np.mean(epoch_stats['test_raw_vio_instance']))*100, 2)
+    data_record.loc[row_index, 'Ineq_vio'] = round(np.mean(epoch_stats['test_raw_ineq_sum'][infeasible_index]), 3)
+    data_record.loc[row_index, 'Ineq_vio_rate'] = round(np.mean(epoch_stats['test_raw_ineq_num_viol_0'][infeasible_index])/data.nineq*100,2)
+    data_record.loc[row_index, 'Eq_vio'] = round(np.mean(epoch_stats['test_raw_eq_sum'][infeasible_index]), 3)
+    data_record.loc[row_index, 'Eq_vio_rate'] = round(np.mean(epoch_stats['test_raw_eq_num_viol_0'][infeasible_index])/data.neq*100, 2)
 
-    data_record.loc[row_index, 'Sol_MAE'] = round(np.mean(epoch_stats['valid_raw_mae_loss']), 2)
-    data_record.loc[row_index, 'Sol_MAPE'] = round(np.mean(epoch_stats['valid_raw_mape_loss'])*100, 2)
-    data_record.loc[row_index, 'Infea_Sol_MAE'] = round(np.mean(epoch_stats['valid_raw_mae_loss'][infeasible_index]), 2)
-    data_record.loc[row_index, 'Infea_Sol_MAPE'] = round(np.mean(epoch_stats['valid_raw_mape_loss'][infeasible_index])*100, 2)
+    data_record.loc[row_index, 'Sol_MAE'] = round(np.mean(epoch_stats['test_raw_mae_loss']), 2)
+    data_record.loc[row_index, 'Sol_MAPE'] = round(np.mean(epoch_stats['test_raw_mape_loss'])*100, 2)
+    data_record.loc[row_index, 'Infea_Sol_MAE'] = round(np.mean(epoch_stats['test_raw_mae_loss'][infeasible_index]), 2)
+    data_record.loc[row_index, 'Infea_Sol_MAPE'] = round(np.mean(epoch_stats['test_raw_mape_loss'][infeasible_index])*100, 2)
 
-    data_record.loc[row_index, 'Obj_MAE'] = round(np.mean(epoch_stats['valid_raw_obj_mae']), 2)
-    data_record.loc[row_index, 'Obj_MAPE'] = round(np.mean(epoch_stats['valid_raw_obj_mape'])*100, 2)
-    data_record.loc[row_index, 'Infea_Obj_MAE'] = round(np.mean(epoch_stats['valid_raw_obj_mae'][infeasible_index]), 2)
-    data_record.loc[row_index, 'Infea_Obj_MAPE'] = round(np.mean(epoch_stats['valid_raw_obj_mape'][infeasible_index])*100, 2)
+    data_record.loc[row_index, 'Obj_MAE'] = round(np.mean(epoch_stats['test_raw_obj_mae']), 2)
+    data_record.loc[row_index, 'Obj_MAPE'] = round(np.mean(epoch_stats['test_raw_obj_mape'])*100, 2)
+    data_record.loc[row_index, 'Infea_Obj_MAE'] = round(np.mean(epoch_stats['test_raw_obj_mae'][infeasible_index]), 2)
+    data_record.loc[row_index, 'Infea_Obj_MAPE'] = round(np.mean(epoch_stats['test_raw_obj_mape'][infeasible_index])*100, 2)
 
     data_record.loc[row_index, 'Ave_time'] =  round(epoch_stats['batch_solve_raw_time'], 4)
     data_record.loc[row_index, 'Ave_speedup'] = round(epoch_stats['batch_raw_speed_up'], 1)
@@ -284,21 +245,21 @@ def csv_record(epoch_stats, data, args):
     if not row_index.any():
         data_record.loc[data_record.shape[0]] = {'Prob': str(data), 'Algo': args['projType']}
         row_index = (data_record['Prob'] == str(data)) & (data_record['Algo'] == args['projType'])
-    data_record.loc[row_index, 'Fea_rate'] = round((1-np.mean(epoch_stats['valid_cor_vio_instance']))*100, 2)
-    data_record.loc[row_index, 'Ineq_vio'] = round(np.mean(epoch_stats['valid_cor_ineq_sum'][infeasible_index]), 3)
-    data_record.loc[row_index, 'Ineq_vio_rate'] = round(np.mean(epoch_stats['valid_cor_ineq_num_viol_0'][infeasible_index])/data.nineq*100,2)
-    data_record.loc[row_index, 'Eq_vio'] = round(np.mean(epoch_stats['valid_cor_eq_sum'][infeasible_index]), 3)
-    data_record.loc[row_index, 'Eq_vio_rate'] = round(np.mean(epoch_stats['valid_cor_eq_num_viol_0'][infeasible_index])/data.neq*100, 2)
+    data_record.loc[row_index, 'Fea_rate'] = round((1-np.mean(epoch_stats['test_cor_vio_instance']))*100, 2)
+    data_record.loc[row_index, 'Ineq_vio'] = round(np.mean(epoch_stats['test_cor_ineq_sum'][infeasible_index]), 3)
+    data_record.loc[row_index, 'Ineq_vio_rate'] = round(np.mean(epoch_stats['test_cor_ineq_num_viol_0'][infeasible_index])/data.nineq*100,2)
+    data_record.loc[row_index, 'Eq_vio'] = round(np.mean(epoch_stats['test_cor_eq_sum'][infeasible_index]), 3)
+    data_record.loc[row_index, 'Eq_vio_rate'] = round(np.mean(epoch_stats['test_cor_eq_num_viol_0'][infeasible_index])/data.neq*100, 2)
 
-    data_record.loc[row_index, 'Sol_MAE'] = round(np.mean(epoch_stats['valid_cor_mae_loss']), 2)
-    data_record.loc[row_index, 'Sol_MAPE'] = round(np.mean(epoch_stats['valid_cor_mape_loss'])*100, 2)
-    data_record.loc[row_index, 'Infea_Sol_MAE'] = round(np.mean(epoch_stats['valid_cor_mae_loss'][infeasible_index]), 2)
-    data_record.loc[row_index, 'Infea_Sol_MAPE'] = round(np.mean(epoch_stats['valid_cor_mape_loss'][infeasible_index])*100, 2)
+    data_record.loc[row_index, 'Sol_MAE'] = round(np.mean(epoch_stats['test_cor_mae_loss']), 2)
+    data_record.loc[row_index, 'Sol_MAPE'] = round(np.mean(epoch_stats['test_cor_mape_loss'])*100, 2)
+    data_record.loc[row_index, 'Infea_Sol_MAE'] = round(np.mean(epoch_stats['test_cor_mae_loss'][infeasible_index]), 2)
+    data_record.loc[row_index, 'Infea_Sol_MAPE'] = round(np.mean(epoch_stats['test_cor_mape_loss'][infeasible_index])*100, 2)
 
-    data_record.loc[row_index, 'Obj_MAE'] = round(np.mean(epoch_stats['valid_cor_obj_mae']), 2)
-    data_record.loc[row_index, 'Obj_MAPE'] = round(np.mean(epoch_stats['valid_cor_obj_mape'])*100, 2)
-    data_record.loc[row_index, 'Infea_Obj_MAE'] = round(np.mean(epoch_stats['valid_cor_obj_mae'][infeasible_index]), 2)
-    data_record.loc[row_index, 'Infea_Obj_MAPE'] = round(np.mean(epoch_stats['valid_cor_obj_mape'][infeasible_index])*100, 2)
+    data_record.loc[row_index, 'Obj_MAE'] = round(np.mean(epoch_stats['test_cor_obj_mae']), 2)
+    data_record.loc[row_index, 'Obj_MAPE'] = round(np.mean(epoch_stats['test_cor_obj_mape'])*100, 2)
+    data_record.loc[row_index, 'Infea_Obj_MAE'] = round(np.mean(epoch_stats['test_cor_obj_mae'][infeasible_index]), 2)
+    data_record.loc[row_index, 'Infea_Obj_MAPE'] = round(np.mean(epoch_stats['test_cor_obj_mape'][infeasible_index])*100, 2)
 
 
     data_record.loc[row_index, 'Ave_time'] = round(epoch_stats['batch_solve_time'], 4)
