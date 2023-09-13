@@ -92,6 +92,29 @@ class MADE(nn.Module):
 
 
 
+class BiLipMADE(MADE):
+    def __init__(self, num_inputs, num_hidden, num_cond_inputs=None, act='relu', pre_exp_tanh=False):
+        super().__init__(num_inputs, num_hidden, num_cond_inputs, act, pre_exp_tanh)
+
+    def forward(self, inputs, cond_inputs=None, mode='direct'):
+        if mode == 'direct':
+            h = self.joiner(inputs, cond_inputs)
+            m, a = self.trunk(h).chunk(2, 1)
+            u = (inputs - m) * torch.exp(-torch.tanh(a))
+            return u, -a
+        else:
+            x = torch.zeros_like(inputs)
+            for i_col in range(inputs.shape[1]):
+                h = self.joiner(x, cond_inputs)
+                m, a = self.trunk(h).chunk(2, 1)
+                x[:, i_col] = inputs[:, i_col] * torch.exp(torch.tanh(a[:, i_col])) + m[:, i_col]
+            return x, -a
+
+
+
+
+
+
 ###################################################################
 # Coupling layers
 ###################################################################
@@ -155,6 +178,8 @@ class CouplingLayer(nn.Module):
         else:
             s = torch.exp(-log_s)
             return (inputs - t) * s, -log_s
+
+
 
 
 ###################################################################

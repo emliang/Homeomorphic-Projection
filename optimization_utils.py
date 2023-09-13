@@ -2,26 +2,28 @@ import torch
 from torch.autograd import Function
 import numpy as np
 import cvxpy as cp
+# import ipopt
 import copy
 import time
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 torch.set_default_dtype(torch.float64)
 
-
 ###################################################################
 # Base PROBLEM
 ###################################################################
 class BaseProblem:
-    def __init__(self, dataset, valid_frac=0.2, test_frac=0.0):
-        self.L = torch.tensor(dataset['L'] )
-        self.U = torch.tensor(dataset['U'] )
+    def __init__(self, dataset, test_size):
+        self.input_L = torch.tensor(dataset['XL'] )
+        self.input_U = torch.tensor(dataset['XU'] )
+        self.L = torch.tensor(dataset['YL'] )
+        self.U = torch.tensor(dataset['YU'] )
         self.X = torch.tensor(dataset['X'] )
         self.Y = torch.tensor(dataset['Y'] )
         self.num = dataset['X'].shape[0]
         self.device = DEVICE
-        self.valid_frac = valid_frac
-        self.test_frac = test_frac
+        # self.valid_frac = valid_frac
+        # self.test_frac = test_frac
 
     def eq_grad(self, X, Y):
         grad_list = []
@@ -70,16 +72,16 @@ class BaseProblem:
         return torch.cat(grad_list, dim=0)
 
     def scale_full(self, X, Y):
-        lower_bound = self.L.view(1, -1)
-        upper_bound = self.U.view(1, -1)
+        # lower_bound = self.L.view(1, -1)
+        # upper_bound = self.U.view(1, -1)
         # The last layer of NN is sigmoid, scale to Opt bound
-        scale_Y = Y * (upper_bound - lower_bound) + lower_bound
+        scale_Y = Y * (self.U - self.L) + self.YL
         return scale_Y
 
     def scale_partial(self, X, Y):
-        lower_bound = (self.L[self.partial_vars]).view(1, -1)
-        upper_bound = (self.U[self.partial_vars]).view(1, -1)
-        scale_Y = Y * (upper_bound - lower_bound) + lower_bound
+        # lower_bound = (self.L[self.partial_vars]).view(1, -1)
+        # upper_bound = (self.U[self.partial_vars]).view(1, -1)
+        scale_Y = Y * (self.U - self.L) + self.L
         return scale_Y
 
     def scale(self, X, Y):
@@ -107,22 +109,22 @@ class QPProblem(BaseProblem):
                    Gy <= h
                    L<= x <=U
     """
-    def __init__(self, dataset, valid_frac=0.2, test_frac=0.0):
-        super().__init__(dataset, valid_frac, test_frac)
+    def __init__(self, dataset, test_size):
+        super().__init__(dataset, test_size)
         self.Q_np = dataset['Q']
         self.p_np = dataset['p']
         self.A_np = dataset['A']
         self.G_np = dataset['G']
         self.h_np = dataset['h']
-        self.L_np = dataset['L']
-        self.U_np = dataset['U']
+        self.L_np = dataset['YL']
+        self.U_np = dataset['YU']
         self.Q = torch.tensor(dataset['Q'] )
         self.p = torch.tensor(dataset['p'] )
         self.A = torch.tensor(dataset['A'] )
         self.G = torch.tensor(dataset['G'] )
         self.h = torch.tensor(dataset['h'] )
-        self.L = torch.tensor(dataset['L'] )
-        self.U = torch.tensor(dataset['U'] )
+        self.L = torch.tensor(dataset['YL'] )
+        self.U = torch.tensor(dataset['YU'] )
         self.X = torch.tensor(dataset['X'] )
         self.Y = torch.tensor(dataset['Y'] )
         self.xdim = dataset['X'].shape[1]
@@ -138,12 +140,10 @@ class QPProblem(BaseProblem):
         self.A_partial = self.A[:, self.partial_vars]
         self.A_other_inv = torch.inverse(self.A[:, self.other_vars])
 
-        self.trainX = self.X[:int(self.num * (1 - self.valid_frac - self.test_frac))]
-        self.validX = self.X[int(self.num * (1 - self.valid_frac - self.test_frac)):int(self.num * (1 - self.test_frac))]
-        self.testX = self.X[int(self.num * (1 - self.test_frac)):]
-        self.trainY = self.Y[:int(self.num * (1 - self.valid_frac - self.test_frac))]
-        self.validY = self.Y[int(self.num * (1 - self.valid_frac - self.test_frac)):int(self.num * (1 - self.test_frac))]
-        self.testY = self.Y[int(self.num * (1 - self.test_frac)):]
+        self.trainX = self.X[:-test_size]
+        self.testX = self.X[-test_size:]
+        self.trainY = self.Y[:-test_size]
+        self.testY = self.Y[-test_size:]
 
     def __str__(self):
         return 'QPProblem-{}-{}-{}-{}'.format(
@@ -264,8 +264,8 @@ class QCQPProbem(QPProblem):
                    1/2 * y^T H y + G^T y <= h
                    L<= x <=U
     """
-    def __init__(self, dataset, valid_frac=0.2, test_frac=0.0):
-        super().__init__(dataset, valid_frac, test_frac)
+    def __init__(self, dataset, test_size):
+        super().__init__(dataset, test_size)
         self.H_np = dataset['H']
         self.H = torch.tensor(dataset['H'] )
 
@@ -393,7 +393,6 @@ class QCQPProbem(QPProblem):
         return torch.tensor(sols )
 
 
-
 ###################################################################
 # SOCP Problem
 ###################################################################
@@ -405,8 +404,8 @@ class SOCPProbem(QPProblem):
                    L<= x <=U
     """
 
-    def __init__(self, dataset, valid_frac=0.2, test_frac=0.0):
-        super().__init__(dataset, valid_frac, test_frac)
+    def __init__(self, dataset, test_size):
+        super().__init__(dataset, test_size)
         self.c_np = dataset['C']
         self.d_np = dataset['d']
         self.C = torch.tensor(dataset['C'] )
@@ -525,7 +524,6 @@ class SOCPProbem(QPProblem):
         return torch.tensor(sols )
 
 
-
 ###################################################################
 # SDP Problem
 ###################################################################
@@ -536,8 +534,8 @@ class SDPProbem(BaseProblem):
                    y >>0
                    L<= y <=U
     """
-    def __init__(self, dataset, valid_frac=0.2, test_frac=0.0):
-        super().__init__(dataset, valid_frac, test_frac)
+    def __init__(self, dataset, test_size):
+        super().__init__(dataset, test_size)
         self.Q_np = dataset['Q']
         self.A_np = dataset['A']
         self.Q = torch.tensor(dataset['Q'] )
@@ -552,8 +550,6 @@ class SDPProbem(BaseProblem):
 
         self.A = self.A.view(-1, self.ydim)
         self.Y = self.Y.permute(0, 2, 1).contiguous().view(-1, self.ydim)
-        self.L = self.L.view(-1)
-        self.U = self.U.view(-1)
 
         best_partial = dataset['best_partial']
         self.partial_vars = best_partial
@@ -562,12 +558,10 @@ class SDPProbem(BaseProblem):
         self.A_partial = self.A[:, self.partial_vars]
         self.A_other_inv = torch.inverse(self.A[:, self.other_vars])
 
-        self.trainX = self.X[:int(self.num * (1 - self.valid_frac - self.test_frac))]
-        self.validX = self.X[int(self.num * (1 - self.valid_frac - self.test_frac)):int(self.num * (1 - self.test_frac))]
-        self.testX = self.X[int(self.num * (1 - self.test_frac)):]
-        self.trainY = self.Y[:int(self.num * (1 - self.valid_frac - self.test_frac))]
-        self.validY = self.Y[int(self.num * (1 - self.valid_frac - self.test_frac)):int(self.num * (1 - self.test_frac))]
-        self.testY = self.Y[int(self.num * (1 - self.test_frac)):]
+        self.trainX = self.X[:-test_size]
+        self.testX = self.X[-test_size:]
+        self.trainY = self.Y[:-test_size]
+        self.testY = self.Y[-test_size:]
         
     def __str__(self):
         return 'SDPProblem-{}-{}-{}-{}'.format(
@@ -715,11 +709,9 @@ class SDPProbem(BaseProblem):
         return sols
 
 
-
 ###################################################################
 # NONCONVEX PROBLEM
 ###################################################################
-# import ipopt
 class NonconvexProblem(QPProblem):
     """
         minimize_y 1/2 * y^T Q y + p^T sin(y)
@@ -868,8 +860,6 @@ class nonconvex_ipopt(object):
     #     print("Objective value at iteration #%d is - %g" % (iter_count, obj_value))
 
 
-
-
 ###################################################################
 # ACOPF
 ###################################################################
@@ -884,9 +874,11 @@ class ACOPFProblem:
                               q_g min   <= q_g  <= q_g max
                               vmag min  <= vmag <= vmag max
                               vang_slack = \theta_slack   # voltage angle
+                              va_ij min <= va_ij <= va_ij max
+                              s_ij <= s_ij max
                               (p_g - p_d) + (q_g - q_d)i = diag(vmag e^{i*vang}) conj(Y) (vmag e^{-i*vang})
     """
-    def __init__(self, data, valid_frac=0.2, test_frac=0.0):
+    def __init__(self, data, test_size):
         ## Define optimization problem input and output variables
         ppc = data['ppc']
         self.ppc = ppc
@@ -902,11 +894,13 @@ class ACOPFProblem:
         self.spv.sort()
         self.pq = np.setdiff1d(range(self.nbus), self.spv)
         self.nonslack_idxes = np.sort(np.concatenate([self.pq, self.pv]))
+        self.branch_idxes = np.concatenate([[ppc['branch'][:, idx_brch.F_BUS]], 
+                                            [ppc['branch'][:, idx_brch.T_BUS]]], axis=0).T - 1
         # pv: generators wihtout slack
         # spv: generators with slack bus (slack bus with known vol angle)
         # pq: load bus (zero Pg Qg generation)
         # ng = len(spv), npv = len(pv), nslack = len(slack), nbus = ng + len(pq)
-        # indices within gens
+        # indices within generator
         self.slack_ = np.array([np.where(x == self.spv)[0][0] for x in self.slack])
         self.pv_ = np.array([np.where(x == self.spv)[0][0] for x in self.pv])
 
@@ -918,15 +912,26 @@ class ACOPFProblem:
         self.quad_costs = torch.tensor(ppc['gencost'][:, 4] )
         self.lin_costs = torch.tensor(ppc['gencost'][:, 5] )
         self.const_cost = ppc['gencost'][:, 6].sum()
-        # print(ppc['gen'][:, idx_gen.MBASE])
+
+        # initial values for solver
+        self.pg_init = torch.tensor(ppc['gen'][:, idx_gen.PG] / self.genbase)
+        self.qg_init = torch.tensor(ppc['gen'][:, idx_gen.QG] / self.genbase)
+        self.vm_init = torch.tensor(ppc['bus'][:, idx_bus.VM])
+        self.va_init = torch.tensor(np.deg2rad(ppc['bus'][:, idx_bus.VA]))
+        # upper and lower bound
         self.pmax = torch.tensor(ppc['gen'][:, idx_gen.PMAX] / self.genbase )
         self.pmin = torch.tensor(ppc['gen'][:, idx_gen.PMIN] / self.genbase )
         self.qmax = torch.tensor(ppc['gen'][:, idx_gen.QMAX] / self.genbase )
         self.qmin = torch.tensor(ppc['gen'][:, idx_gen.QMIN] / self.genbase )
         self.vmax = torch.tensor(ppc['bus'][:, idx_bus.VMAX] )
         self.vmin = torch.tensor(ppc['bus'][:, idx_bus.VMIN] )
-        self.slackva = torch.tensor(np.array([np.deg2rad(ppc['bus'][self.slack, idx_bus.VA])])).squeeze(-1)
-        
+        self.smax = torch.tensor(ppc['branch'][:, idx_brch.RATE_A] / self.baseMVA) 
+        self.amax = torch.tensor(np.deg2rad(ppc['branch'][:, idx_brch.ANGMAX])) 
+        self.amin = torch.tensor(np.deg2rad(ppc['branch'][:, idx_brch.ANGMIN]))
+        self.slackva = self.va_init[self.slack]
+        # torch.tensor(np.array([np.deg2rad(ppc['bus'][self.slack, idx_bus.VA])])).squeeze(-1)
+
+
         ppc2 = copy.deepcopy(ppc)
         ppc2['bus'][:, 0] -= 1
         ppc2['branch'][:, [0, 1]] -= 1
@@ -935,20 +940,6 @@ class ACOPFProblem:
         self.Ybusr = torch.tensor(np.real(Ybus) )
         self.Ybusi = torch.tensor(np.imag(Ybus) )
 
-        X = np.concatenate([np.real(demand), np.imag(demand)], axis=1)
-        Y = np.concatenate([np.real(gen), np.imag(gen), np.abs(voltage), np.angle(voltage)], axis=1)
-        feas_mask = ~np.isnan(Y).any(axis=1)
-
-        self.X = torch.tensor(X[feas_mask] )
-        self.Y = torch.tensor(Y[feas_mask] )
-        self.xdim = X.shape[1]
-        self.ydim = Y.shape[1]
-        self.num = feas_mask.sum()
-
-        self.neq = 2 * self.nbus
-        self.nineq = 4 * self.ng + 2 * self.nbus
-        self.nknowns = self.nslack
-        print(self.neq, self.nineq, self.ydim, self.xdim)
         # indices of useful quantities in full solution
         self.pg_start_yidx = 0
         self.qg_start_yidx = self.ng
@@ -959,51 +950,60 @@ class ACOPFProblem:
         self.EPS_INTERIOR = data['EPS_INTERIOR'][0][0]
         self.CorrCoeff = data['CorrCoeff'][0][0]
         self.MaxChangeLoad = data['MaxChangeLoad'][0][0]
+        base_load = torch.tensor(np.concatenate([ppc['bus'][:, idx_bus.PD],
+                                                 ppc['bus'][:, idx_bus.QD]],axis=0)) / self.baseMVA
+        self.input_L = base_load * (1-self.MaxChangeLoad)
+        self.input_U = base_load * (1+self.MaxChangeLoad)
 
         ## Define train/valid/test split
-        self.valid_frac = valid_frac
-        self.test_frac = test_frac
+        # self.valid_frac = valid_frac
+        # self.test_frac = test_frac
+
+        ### Load data
+        X = np.concatenate([np.real(demand), np.imag(demand)], axis=1)
+        Y = np.concatenate([np.real(gen), np.imag(gen), 
+                            np.abs(voltage), np.angle(voltage)], axis=1)
+        feas_mask = ~np.isnan(Y).any(axis=1)
+        self.X = torch.tensor(X[feas_mask] )
+        self.Y = torch.tensor(Y[feas_mask] )
+        self.xdim = X.shape[1]
+        self.ydim = Y.shape[1]
+        self.num = feas_mask.sum()
+        self.neq = 2 * self.nbus
+        self.nineq = 4 * self.ng + 2 * self.nbus
+        self.nknowns = self.nslack
+        print(self.neq, self.nineq, self.ydim, self.xdim)
+
+        self.trainX = self.X[:-test_size]
+        self.testX = self.X[-test_size:]
+        self.trainY = self.Y[:-test_size]
+        self.testY = self.Y[-test_size:]
+
 
         ## Define variables and indices for "partial completion" neural network
-
         # pg (non-slack) and |v|_g (including slack)
-        self.partial_vars = np.concatenate(
-            [self.pg_start_yidx + self.pv_, self.vm_start_yidx + self.spv, self.va_start_yidx + self.slack])
+        self.partial_vars = np.concatenate([self.pg_start_yidx + self.pv_, 
+                                            self.vm_start_yidx + self.spv, 
+                                            self.va_start_yidx + self.slack])
         self.other_vars = np.setdiff1d(np.arange(self.ydim), self.partial_vars)
-        self.partial_unknown_vars = np.concatenate([self.pg_start_yidx + self.pv_, self.vm_start_yidx + self.spv])
-
-        # initial values for solver
-        self.vm_init = ppc['bus'][:, idx_bus.VM]
-        self.va_init = np.deg2rad(ppc['bus'][:, idx_bus.VA])
-        self.pg_init = ppc['gen'][:, idx_gen.PG] / self.genbase
-        self.qg_init = ppc['gen'][:, idx_gen.QG] / self.genbase
+        self.partial_unknown_vars = np.concatenate([self.pg_start_yidx + self.pv_, 
+                                                    self.vm_start_yidx + self.spv])
 
         # indices of useful quantities in partial solution
         self.pg_pv_zidx = np.arange(self.npv)
         self.vm_spv_zidx = np.arange(self.npv, 2 * self.npv + self.nslack)
-
         # useful indices for equality constraints
         self.pflow_start_eqidx = 0
         self.qflow_start_eqidx = self.nbus
 
         ### For Pytorch
-        self.device = None
+        self.device = DEVICE
 
-        ###
-        self.trainX = self.X[:int(self.num * (1 - self.valid_frac - self.test_frac))]
-        self.validX = self.X[
-                      int(self.num * (1 - self.valid_frac - self.test_frac)):int(self.num * (1 - self.test_frac))]
-        self.testX = self.X[int(self.num * (1 - self.test_frac)):]
-        self.trainY = self.Y[:int(self.num * (1 - self.valid_frac - self.test_frac))]
-        self.validY = self.Y[
-                      int(self.num * (1 - self.valid_frac - self.test_frac)):int(self.num * (1 - self.test_frac))]
-        self.testY = self.Y[int(self.num * (1 - self.test_frac)):]
+
 
     def __str__(self):
         return 'ACOPF-{}-{}-{}-{}-{}-{}'.format(
-            self.nbus,
-            self.EPS_INTERIOR, self.CorrCoeff, self.MaxChangeLoad,
-            self.valid_frac, self.test_frac)
+            self.nbus, self.EPS_INTERIOR, self.CorrCoeff, self.MaxChangeLoad,  0.2, 0.0)
 
     def get_yvars(self, Y):
         pg = Y[:, :self.ng]
@@ -1050,25 +1050,69 @@ class ACOPFProblem:
 
     def ineq_resid(self, X, Y):
         pg, qg, vm, va = self.get_yvars(Y)
+        ## Bus llimit
         resids = torch.cat([
             pg - self.pmax,
             self.pmin - pg,
             qg - self.qmax,
             self.qmin - qg,
             vm - self.vmax,
-            self.vmin - vm
+            self.vmin - vm,
+            # self.branch_ineq_resid(X, Y)
         ], dim=1)
         return torch.clamp(resids, 0)
+
+    def branch_ineq_resid(self, X, Y):
+        _, _, vm, va = self.get_yvars(Y)
+        ### Branch angele limit
+        vaij = va.view(-1,self.nbus,1) - va.view(-1,1,self.nbus)
+        branch_a = vaij[:,self.branch_idxes[:,0], self.branch_idxes[:,1]]
+        resids_brach_angle = torch.cat([branch_a - self.amax, 
+                                  self.amin - branch_a], dim=1)
+        
+        ### Branch flow limit
+        vmij = vm.view(-1,self.nbus,1) * vm.view(-1,1,self.nbus)
+        vmii = vm.view(-1,self.nbus,1) ** 2
+        sin_vaij = torch.sin(vaij)
+        cos_vaij = torch.cos(vaij)
+        pij = (
+            self.Ybusr.view(-1,self.nbus,self.nbus) * vmii -  \
+            vmij * (self.Ybusi.view(-1,self.nbus,self.nbus)*sin_vaij + \
+            self.Ybusr.view(-1,self.nbus,self.nbus)*cos_vaij)
+            )[:,self.branch_idxes[:,0], self.branch_idxes[:,1]]
+        qij = (
+            - self.Ybusi.view(-1,self.nbus,self.nbus) * vmii -  \
+            vmij * (self.Ybusr.view(-1,self.nbus,self.nbus)*sin_vaij - \
+            self.Ybusi.view(-1,self.nbus,self.nbus)*cos_vaij)
+            )[:,self.branch_idxes[:,0], self.branch_idxes[:,1]]
+        sij = torch.sqrt(pij**2 + qij**2)
+        resids_brach_flow = sij - self.smax 
+        # print(sij, self.smax ** 2)
+        # print(1/0)
+        return torch.clamp(torch.cat([resids_brach_angle, resids_brach_flow], dim=1), 0)
 
     def eq_grad(self, X, Y):
         eq_jac = self.eq_jac(Y)
         eq_resid = self.eq_resid(X, Y)
         return 2 * eq_jac.transpose(1, 2).bmm(eq_resid.unsqueeze(-1)).squeeze(-1)
 
-    def ineq_grad(self, X, Y):
-        ineq_jac = self.ineq_jac(Y)
-        ineq_resid = self.ineq_resid(X, Y)
-        return 2 * ineq_jac.transpose(1, 2).bmm(ineq_resid.unsqueeze(-1)).squeeze(-1)
+    def ineq_grad(self, X, Y, mode='unfold'):
+        if mode == 'unfold':
+            ineq_jac = self.ineq_jac(Y)
+            ineq_resid = self.ineq_resid(X, Y)
+            return 2 * ineq_jac.transpose(1, 2).bmm(ineq_resid.unsqueeze(-1)).squeeze(-1)
+        elif mode == 'autograd':
+            grad_list = []
+            for n in range(Y.shape[0]):
+                x = X[n].view(1, -1)
+                y = Y[n].view(1, -1)
+                y = torch.autograd.Variable(y, requires_grad=True)
+                ineq_penalty = self.ineq_resid(x, y) ** 2
+                ineq_penalty = torch.sum(ineq_penalty, dim=-1, keepdim=True)
+                grad = torch.autograd.grad(ineq_penalty, y)[0]
+                grad_list.append(grad.view(1, -1))
+            grad = torch.cat(grad_list, dim=0)
+            return grad        
 
     def ineq_partial_grad(self, X, Y):
         eq_jac = self.eq_jac(Y)
@@ -1161,15 +1205,12 @@ class ACOPFProblem:
         return jac.unsqueeze(0).expand(Y.shape[0], *jac.shape)
 
     def scale_full(self, X, Y):
-        pg = Y[:, :self.qg_start_yidx] * (self.pmax - self.pmin) + self.pmin
-        qg = Y[:, self.qg_start_yidx:self.vm_start_yidx] * (self.qmax - self.qmin) + self.qmin
-        vm = Y[:, self.vm_start_yidx:] * (self.vmax - self.vmin) + self.vmin
-
-        va = torch.zeros(X.shape[0], self.nbus, device=X.device)
-        va[:, self.nonslack_idxes] = Y[:, self.va_start_yidx:] * 2 * np.pi
-        va[:, self.slack] = torch.tensor(self.slack_va, device=X.device ).unsqueeze(
-            0).expand(X.shape[0], self.nslack)
-
+        pg, qg, vm, va = self.get_yvars(Y)
+        pg = pg * (self.pmax - self.pmin) + self.pmin
+        qg = qg * (self.qmax - self.qmin) + self.qmin
+        vm = vm * (self.vmax - self.vmin) + self.vmin
+        va = va * 2 * np.pi - np.pi # (-pi, pi)
+        va[:, self.slack] = self.slack_va#.unsqueeze(0).expand(X.shape[0], self.nslack)
         return torch.cat([pg, qg, vm, va], dim=1)
 
     def scale_partial(self, X, Y):
@@ -1195,7 +1236,8 @@ class ACOPFProblem:
         if backward:
             return PFFunction(self)(X, Y)
         else:
-            return PFFunction_forward(self)(X, Y)
+            with torch.no_grad():
+                return PFFunction(self)(X, Y)
 
     def cal_penalty(self, X, Y):
         penalty = torch.cat([self.ineq_resid(X, Y), self.eq_resid(X, Y)], dim=1)
@@ -1320,8 +1362,8 @@ def PFFunction(data, tol=1e-5, bsz=1024, max_iters=10):
             Y[:, data.pg_start_yidx + data.pv_] = Z[:, data.pg_pv_zidx]  # pg at non-slack gens
             Y[:, data.vm_start_yidx + data.spv] = Z[:, data.vm_spv_zidx]  # vm at gens
             # init guesses for remaining values
-            Y[:, data.vm_start_yidx + data.pq] = torch.tensor(data.vm_init[data.pq], device=X.device)  # vm at load buses
-            Y[:, data.va_start_yidx: data.va_start_yidx+data.nb] = torch.tensor(data.va_init, device=X.device)  # va at all bus
+            Y[:, data.vm_start_yidx + data.pq] = data.vm_init[data.pq]  # vm at load buses
+            Y[:, data.va_start_yidx: data.va_start_yidx+data.nb] = data.va_init   # va at all bus
             Y[:, data.qg_start_yidx:data.qg_start_yidx + data.ng] = 0  # qg at gens (not used in Newton upd)
             Y[:, data.pg_start_yidx + data.slack_] = 0  # pg at slack (not used in Newton upd)
 
@@ -1365,11 +1407,10 @@ def PFFunction(data, tol=1e-5, bsz=1024, max_iters=10):
                     # print('lin run_time', time.time()-start_time)
                     # ineq_step = data.ineq_grad(X_b, Y_b)
                     Y_b[:, newton_guess_inds] -= delta
-                    
-               
-
                     if torch.abs(delta).max() < tol:
                         break
+                if torch.abs(delta).max() > tol:
+                    print('Newton methods for Power Flow does not converge')
                 # print(torch.abs(delta).max())
                 converged[b:b + bsz] = (delta.abs() < tol).all(dim=1)
                 jacs.append(jac_full)
@@ -1385,8 +1426,8 @@ def PFFunction(data, tol=1e-5, bsz=1024, max_iters=10):
 
             ctx.data = data
             ctx.save_for_backward(torch.cat(jacs),
-                                  torch.tensor(newton_guess_inds, device=X.device),
-                                  torch.tensor(keep_constr, device=X.device))
+                                  torch.as_tensor(newton_guess_inds, device=X.device),
+                                  torch.as_tensor(keep_constr, device=X.device))
             return Y
 
         @staticmethod
@@ -1443,54 +1484,3 @@ def PFFunction(data, tol=1e-5, bsz=1024, max_iters=10):
                 data.pg_start_yidx + data.pv_, data.vm_start_yidx + data.spv])]
             return dl_dx_total, dl_dz_total
     return PFFunctionFn.apply
-
-def PFFunction_forward(data, tol=1e-5, bsz=1024, max_iters=5):
-    class PFFunction_forwardFn(Function):
-        @staticmethod
-        def forward(ctx, X, Z):
-            ## Step 1: Newton's method
-            Y = torch.zeros(X.shape[0], data.ydim, device=X.device)
-            # known/estimated values (pg at pv buses, vm at all gens, va at slack bus)
-            Y[:, data.pg_start_yidx + data.pv_] = Z[:, data.pg_pv_zidx]  # pg at non-slack gens
-            Y[:, data.vm_start_yidx + data.spv] = Z[:, data.vm_spv_zidx]  # vm at gens
-            # init guesses for remaining values
-            Y[:, data.vm_start_yidx + data.pq] = torch.tensor(data.vm_init[data.pq], device=X.device)  # vm at load buses
-            Y[:, data.va_start_yidx: data.va_start_yidx+data.nb] = torch.tensor(data.va_init, device=X.device)  # va at all bus
-            Y[:, data.qg_start_yidx:data.qg_start_yidx + data.ng] = 0  # qg at gens (not used in Newton upd)
-            Y[:, data.pg_start_yidx + data.slack_] = 0  # pg at slack (not used in Newton upd)
-
-            keep_constr = np.concatenate([
-                data.pflow_start_eqidx + data.pv,  # real power flow at non-slack gens
-                data.pflow_start_eqidx + data.pq,  # real power flow at load buses
-                data.qflow_start_eqidx + data.pq])  # reactive power flow at load buses
-            newton_guess_inds = np.concatenate([
-                data.vm_start_yidx + data.pq,  # vm at load buses
-                data.va_start_yidx + data.pv,  # va at non-slack gens
-                data.va_start_yidx + data.pq])  # va at load buses
-            converged = torch.zeros(X.shape[0])
-            for b in range(0, X.shape[0], bsz):
-                X_b = X[b:b + bsz]
-                Y_b = Y[b:b + bsz]
-                for i in range(max_iters):
-                    gy = data.eq_resid(X_b, Y_b)[:, keep_constr]
-                    jac_full = data.eq_jac(Y_b)
-                    jac = jac_full[:, keep_constr, :]
-                    jac = jac[:, :, newton_guess_inds]
-                    # newton_jac_inv = torch.inverse(jac)
-                    # delta = torch.matmul(newton_jac_inv, gy.unsqueeze(-1)).squeeze(-1)
-                    delta = torch.linalg.solve(jac, gy.unsqueeze(-1)).squeeze(-1)
-                    Y_b[:, newton_guess_inds] -= delta
-                    if torch.abs(delta).max() < tol:
-                        break
-                converged[b:b + bsz] = (delta.abs() < tol).all(dim=1)
-
-            ## Step 2: Solve for remaining variables
-            # solve for qg values at all gens (note: requires qg in Y to equal 0 at start of computation)
-            Y[:, data.qg_start_yidx:data.qg_start_yidx + data.ng] = \
-                -data.eq_resid(X, Y)[:, data.qflow_start_eqidx + data.spv]
-            # solve for pg at slack bus (note: requires slack pg in Y to equal 0 at start of computation)
-            Y[:, data.pg_start_yidx + data.slack_] = \
-                -data.eq_resid(X, Y)[:, data.pflow_start_eqidx + data.slack]
-            return Y
-
-    return PFFunction_forwardFn.apply
